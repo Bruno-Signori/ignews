@@ -1,19 +1,62 @@
 import { NextApiRequest, NextApiResponse } from "next";
 import { stripe } from "../../services/stripe";
 import {getSession} from 'next-auth/client'
+import { fauna } from "../../services/fauna";
+import {query} from 'faunadb';
 
+
+type User = {
+  ref: {
+    id: string,
+  }
+  data: {
+    stripe_customer_id: string,
+  }
+}
 
 export default async (req: NextApiRequest, res: NextApiResponse) => {
   if (req.method === 'POST') {
     const session = await getSession({ req })
 
-    const STRIPE_COSTUMER = await stripe.customers.create({
-      email: session.user.email,
-      //metadata
-    })
+    const user = await fauna.query<User>(
+      // estou buscando se existe o usuario. pelo campo de email
+      query.Get(
+        query.Match(
+          query.Index('user_by_email'),
+          query.Casefold(session.user.email)
+        )
+      )
+    )
+    
+    // estou verificando se usuario ja existe para duplicar dentro do stripe/faunaDB
+    let customerId = user.data.stripe_customer_id;
+    //se nao existir eu crio 
+    if(!customerId) {
+      const stripeCustomer = await stripe.customers.create({
+        email: session.user.email,
+        //metadata
+      })
+      
+    await fauna.query(
+      // estou atualizando o usuario. estou pegando os dados do Get acima. 
+      query.Update(
+        query.Ref(query.Collection('users'), user.ref.id),
+        {
+          data: {
+            stripe_customer_id: stripeCustomer.id,
+          }
+        }
+      )
+    )
 
-    const STRIPE_CHECKOUT_SESSION = await stripe.checkout.sessions.create({
-      customer: STRIPE_COSTUMER.id,
+    customerId = stripeCustomer.id
+    }
+
+  
+
+
+    const stripeCheckoutSession = await stripe.checkout.sessions.create({
+      customer: customerId,
       payment_method_types: ['card'],
       billing_address_collection: 'required',
       line_items: [
@@ -26,11 +69,11 @@ export default async (req: NextApiRequest, res: NextApiResponse) => {
 
     })
     
-    return res.status(200).json({sessionId: STRIPE_CHECKOUT_SESSION.id })
+    return res.status(200).json({sessionId: stripeCheckoutSession.id })
 
   } else {
     res.setHeader('Allow','POST')
-    res.status(405).end('Method no allowed')
+    res.status(405).end('Method not allowed')
   }
 
 }
